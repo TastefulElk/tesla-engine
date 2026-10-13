@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Ghost Engine</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Saira+Condensed:wght@500;600;700&family=Saira:wght@400;500;600&family=JetBrains+Mono:wght@400&display=swap">
+<style>
+  /* Layout: instrument cluster left, big touch controls right, raw sensor readouts below. Night-cluster look, amber lighting. */
+  :root {
+    --bg: #0f1114;
+    --panel: #171a1e;
+    --line: #2a2f36;
+    --fg: #ece7dc;
+    --muted: #8d939c;
+    --amber: #ffb340;
+    --red: #ff5a3c;
+    --ok: #5fd39c;
+    --display: "Saira Condensed", "Arial Narrow", system-ui, sans-serif;
+    --body: "Saira", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--fg); }
+  body {
+    font-family: var(--body);
+    font-size: 16px;
+    line-height: 1.45;
+    padding-inline: max(16px, env(safe-area-inset-left));
+    padding-block: max(16px, env(safe-area-inset-top)) 32px;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .wrap { max-width: 1400px; margin: 0 auto; display: grid; gap: 20px; }
+
+  header.top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
+  .brand { display: flex; align-items: baseline; gap: 12px; }
+  h1 { font-family: var(--display); font-weight: 700; font-size: 2rem; letter-spacing: 0.04em; text-transform: uppercase; margin: 0; }
+  .brand small { color: var(--muted); font-size: 0.85rem; letter-spacing: 0.06em; text-transform: uppercase; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip {
+    font-family: var(--display); font-weight: 600; font-size: 0.95rem; letter-spacing: 0.06em; text-transform: uppercase;
+    padding: 4px 12px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted);
+  }
+  .chip::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; background: var(--muted); vertical-align: 1px; }
+  .chip[data-level="ok"] { color: var(--fg); }
+  .chip[data-level="ok"]::before { background: var(--ok); }
+  .chip[data-level="wait"]::before { background: var(--amber); }
+  .chip[data-level="bad"] { color: var(--red); }
+  .chip[data-level="bad"]::before { background: var(--red); }
+
+  .layout { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 20px; align-items: start; }
+  @media (max-width: 860px) { .layout { grid-template-columns: minmax(0, 1fr); } }
+
+  .cluster { display: grid; gap: 16px; justify-items: center; }
+  .tach { position: relative; width: min(100%, 520px); aspect-ratio: 1; max-width: 100%; }
+  .tach canvas { width: 100%; height: 100%; display: block; }
+  .readout { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 2px; pointer-events: none; }
+  .gear { font-family: var(--display); font-weight: 700; font-size: clamp(4rem, 14vw, 8.5rem); line-height: 0.9; color: var(--amber); font-variant-numeric: tabular-nums; }
+  .speed { font-family: var(--display); font-weight: 600; font-size: clamp(1.8rem, 5vw, 2.8rem); line-height: 1; font-variant-numeric: tabular-nums; }
+  .speed small { font-size: 0.45em; color: var(--muted); margin-left: 6px; letter-spacing: 0.08em; }
+  .rpm { font-family: var(--mono); color: var(--muted); font-size: 0.95rem; font-variant-numeric: tabular-nums; }
+  .source { font-size: 0.8rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
+
+  .bars { width: min(100%, 520px); display: grid; gap: 10px; }
+  .bar { display: grid; grid-template-columns: 4.5rem 1fr 4.5rem; align-items: center; gap: 12px; }
+  .bar label, .bar span { font-family: var(--display); font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; font-size: 0.9rem; color: var(--muted); }
+  .bar span { text-align: right; font-variant-numeric: tabular-nums; }
+  .track { height: 10px; border-radius: 5px; background: var(--line); overflow: hidden; }
+  .fill { height: 100%; background: var(--amber); transform-origin: left; transform: scaleX(0); }
+  .fill.boost { background: var(--fg); }
+
+  .controls { display: grid; gap: 18px; }
+  button {
+    font: inherit; font-family: var(--display); font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+    min-height: 64px; padding: 12px 20px; font-size: 1.25rem; cursor: pointer; touch-action: manipulation;
+  }
+  button:focus-visible, input:focus-visible + strong { outline: 2px solid var(--amber); outline-offset: 3px; }
+  button:disabled { opacity: 0.4; cursor: default; }
+  .power { min-height: 96px; font-size: 1.8rem; background: var(--amber); color: #1a1206; border-color: var(--amber); }
+  .power.on { background: transparent; color: var(--amber); }
+
+  .engines { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .engine { position: relative; display: grid; gap: 2px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); cursor: pointer; min-height: 76px; }
+  .engine input { position: absolute; opacity: 0; pointer-events: none; }
+  .engine strong { font-family: var(--display); font-weight: 600; font-size: 1.25rem; letter-spacing: 0.03em; }
+  .engine span { color: var(--muted); font-size: 0.9rem; }
+  .engine:has(input:checked) { border-color: var(--amber); box-shadow: inset 0 0 0 1px var(--amber); }
+  .engine:has(input:checked) strong { color: var(--amber); }
+
+  .sliders { display: grid; gap: 14px; }
+  .slider { display: grid; grid-template-columns: 5.5rem 1fr; align-items: center; gap: 14px; }
+  .slider label { font-family: var(--display); font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+  input[type="range"] { width: 100%; height: 40px; accent-color: var(--amber); }
+
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .rev { user-select: none; -webkit-user-select: none; touch-action: none; }
+  .rev:not(:disabled):active { background: var(--red); border-color: var(--red); color: #1a0703; }
+  .note { margin: 0; color: var(--muted); font-size: 0.95rem; }
+
+  .diag { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+  .diag article { min-width: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; }
+  .diag h2 { font-family: var(--display); font-weight: 600; font-size: 1rem; letter-spacing: 0.1em; text-transform: uppercase; margin: 0 0 8px; color: var(--amber); }
+  dl { margin: 0; display: grid; grid-template-columns: minmax(0, 10rem) minmax(0, 1fr); gap: 4px 14px; font-size: 0.85rem; }
+  dt { color: var(--muted); overflow-wrap: anywhere; }
+  dd { margin: 0; font-family: var(--mono); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="brand"><h1>Ghost Engine</h1><small>GPS-synced engine sound</small></div>
+    <div class="chips">
+      <span class="chip" id="chipGps" data-level="wait">GPS waiting</span>
+      <span class="chip" id="chipMotion" data-level="wait">Motion checking</span>
+      <span class="chip" id="chipAudio" data-level="wait">Audio off</span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="cluster" aria-label="Instrument cluster">
+      <div class="tach">
+        <canvas id="tach" aria-hidden="true"></canvas>
+        <div class="readout">
+          <div class="gear" id="gear">–</div>
+          <div class="speed"><span id="speed">0</span><small>km/h</small></div>
+          <div class="rpm"><span id="rpm">0</span> rpm</div>
+          <div class="source" id="source">GPS</div>
+        </div>
+      </div>
+      <div class="bars">
+        <div class="bar"><label>Load</label><div class="track"><div class="fill" id="loadBar"></div></div><span></span></div>
+        <div class="bar"><label>Boost</label><div class="track"><div class="fill boost" id="boostBar"></div></div><span id="boostVal">0.0 bar</span></div>
+      </div>
+    </section>
+
+    <section class="controls" aria-label="Controls">
+      <button id="power" class="power" type="button">Start engine</button>
+      <div class="engines" id="engines" role="radiogroup" aria-label="Engine"></div>
+      <div class="sliders">
+        <div class="slider"><label for="vol">Volume</label><input id="vol" type="range" min="0" max="100" step="1"></div>
+        <div class="slider"><label for="drama">Drama</label><input id="drama" type="range" min="50" max="200" step="5"></div>
+      </div>
+      <div class="row">
+        <button id="rev" class="rev" type="button" disabled>Hold to rev</button>
+        <button id="demo" type="button">Demo drive</button>
+      </div>
+      <p class="note">Set it up while parked, then just drive. Revving works only when stopped. Demo drive fakes a 1&nbsp;Hz GPS feed so you can hear launches, shifts and lift-off pops without moving.</p>
+    </section>
+  </main>
+
+  <section class="diag" aria-label="Diagnostics">
+    <article><h2>GPS</h2><dl id="gpsDiag"></dl></article>
+    <article><h2>Motion events</h2><dl id="motionDiag"></dl></article>
+    <article><h2>Sensor APIs</h2><dl id="sensorDiag"></dl></article>
+    <article><h2>Browser</h2><dl id="browserDiag"></dl></article>
+  </section>
+</div>
+<script src="presets.js"></script>
+<script src="dsp.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
