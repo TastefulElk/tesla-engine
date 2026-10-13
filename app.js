@@ -32,6 +32,7 @@ const state = {
   source: "gps",
   fix: null,
   accel: 0,
+  rawAccel: 0,
   v: 0,
   gear: 0,
   rpm: 0,
@@ -40,6 +41,8 @@ const state = {
   overrun: 0,
   liftArm: 0,
   shiftT: 0,
+  shiftEnd: 0,
+  shiftHard: false,
   blipT: 0,
   limiterT: 0,
   startT: 0,
@@ -129,9 +132,16 @@ const onFix = (v, t) => {
   if (state.fix) {
     const dt = (t - state.fix.t) / 1000;
     if (dt > 0.25 && dt < 4) {
+      // A fix only shows the average over the last interval. Extend the trend
+      // to estimate the acceleration right now, so throttle and lift register a fix sooner.
       const raw = (fix.v - state.fix.v) / dt;
-      state.accel = Math.abs(raw) < 0.2 ? state.accel * 0.3 : lerp(state.accel, raw, 0.85);
-    } else if (dt >= 4) state.accel = 0;
+      const aNow = clamp(raw + 0.6 * (raw - state.rawAccel), raw - 2.5, raw + 2.5);
+      state.rawAccel = raw;
+      state.accel = Math.abs(aNow) < 0.2 ? 0 : aNow;
+    } else if (dt >= 4) {
+      state.accel = 0;
+      state.rawAccel = 0;
+    }
   }
   state.fix = fix;
 };
@@ -187,6 +197,7 @@ const runDemo = () => {
   state.source = "demo";
   state.fix = null;
   state.accel = 0;
+  state.rawAccel = 0;
   let v = 0;
   let seg = 0;
   let segT = 0;
@@ -238,17 +249,17 @@ const tick = () => {
     a = age > 4 ? 0 : state.accel;
     vTarget = Math.max(0, state.fix.v + a * Math.min(age, 1.2));
   }
-  state.v += (vTarget - state.v) * ease(dt, 0.25);
+  state.v += (vTarget - state.v) * ease(dt, 0.15);
   const moving = state.v > MOVING;
   if (moving) state.revHeld = false;
 
   // Throttle is inferred from acceleration.
   let tLoad;
   if (!moving) tLoad = state.revHeld ? 1 : 0;
-  else if (a > 0.25) tLoad = clamp(0.3 + ((a - 0.25) / 2.2) * state.drama, 0, 1);
+  else if (a > 0.25) tLoad = clamp(0.25 + ((a - 0.25) / 3.2) * state.drama, 0, 1);
   else if (a < -0.4) tLoad = 0;
   else tLoad = 0.22;
-  state.load += (tLoad - state.load) * ease(dt, tLoad > state.load ? 0.12 : 0.08);
+  state.load += (tLoad - state.load) * ease(dt, tLoad > state.load ? 0.06 : 0.05);
 
   // Lift-off after real throttle: crackle, and dump boost through the valve.
   if (state.load > 0.5) state.liftArm = now;
@@ -262,19 +273,27 @@ const tick = () => {
   }
   state.overrun *= Math.exp(-dt / (tLoad > 0.3 ? 0.05 : 0.9));
 
-  // Virtual gearbox.
+  // Virtual gearbox: rev out under throttle, short-shift when cruising.
   if (!moving) state.gear = 0;
-  else if (now - state.shiftT > 600) {
+  else if (now - state.shiftT > 500) {
     const r = gearRpm(p, state.v, state.gear);
-    const up = lerp(p.redline * 0.36, p.redline * 0.9, state.load ** 1.2);
+    const up = a > 0.3 ? p.redline * lerp(0.34, 0.92, state.load ** 1.6) : p.redline * 0.36;
     // Braking keeps the revs up with blipped downshifts, like a driver would.
     const down = a < -0.8 ? p.redline * 0.3 : lerp(p.idle * 1.6, p.redline * 0.42, state.load);
     if (state.gear < p.gears.length - 1 && r > up && a > -0.2) {
+      // Upshift: torque cut while the revs fall to the next gear, then power back on.
       state.gear++;
       state.shiftT = now;
-      if (state.load > 0.45) {
-        post({ type: "cut", ms: 90 });
-        if (p.turbo && state.boost > 0.5) post({ type: "pop", amt: 0.8 });
+      state.shiftHard = state.load > 0.35;
+      const ms = state.shiftHard ? lerp(240, 140, state.load) : 170;
+      state.shiftEnd = now + ms;
+      if (state.shiftHard) {
+        post({ type: "cut", ms: ms * 0.75 });
+        if (p.turbo && state.boost > 0.4) {
+          post({ type: "bov", amt: state.boost * 0.45 });
+          state.boost *= 0.65;
+        }
+        if (state.load > 0.7) post({ type: "pop", amt: 0.7 });
       }
     } else if (state.gear > 0 && r < down) {
       state.gear--;
@@ -286,12 +305,13 @@ const tick = () => {
   // Target rpm: starter, catch, idle, free rev, or locked to the wheels.
   const sinceStart = now - state.startT;
   const blip = state.blipT && now - state.blipT < 160;
+  const shifting = now < state.shiftEnd;
   let tRpm;
   if (sinceStart < 900) tRpm = 230;
   else if (sinceStart < 2600) tRpm = lerp(p.idle * 1.9, p.idle, (sinceStart - 900) / 1700);
   else if (!moving) tRpm = state.revHeld ? p.redline * 1.02 : p.idle;
   else {
-    const slip = state.gear === 0 && state.v < 5 ? p.idle + state.load * 2600 : 0;
+    const slip = state.gear === 0 ? (p.idle + state.load * 1800) * clamp(1.6 - state.v / 5, 0, 1) : 0;
     tRpm = Math.max(p.idle, gearRpm(p, state.v, state.gear), slip);
   }
   if (blip) tRpm += 900;
@@ -314,7 +334,7 @@ const tick = () => {
   post({
     type: "params",
     rpm: state.rpm,
-    load: blip ? 0.7 : sinceStart < 2600 ? 0.35 : state.load,
+    load: blip ? 0.7 : sinceStart < 2600 ? 0.35 : shifting ? (state.shiftHard ? 0.02 : state.load * 0.4) : state.load,
     boost: state.boost,
     overrun: state.overrun,
     vol: state.running ? state.vol : 0,

@@ -117,7 +117,7 @@ class EngineDSP {
         bq.g = g;
         return bq;
       });
-      this.banks.push({ pulse: 0, gain: p.bankGain ? p.bankGain[b] : 1, res });
+      this.banks.push({ fast: 0, slow: 0, gain: p.bankGain ? p.bankGain[b] : 1, res });
     }
     // Small fixed imbalance per cylinder gives the idle its lope.
     this.cyl = p.fires.map((_, i) => 1 + (hash01(i) - 0.5) * 0.18);
@@ -135,11 +135,18 @@ class EngineDSP {
     this.muff.set("lp", p.muffle[0] + (p.muffle[1] - p.muffle[0]) * open, 0.75, sr);
     this.intake.set("bp", 500 + this.rpm * 0.22, 1.1, sr);
     this.bovF.set("bp", 1400 + 3200 * this.bovEnv, 0.8, sr);
-    this.pDecay = Math.exp(-1 / (p.tau * (1.25 - 0.55 * r) * sr));
+    // Pulse = difference of two decays: a soft attack at idle, a sharp crack under load.
+    const tau = p.tau * (1.25 - 0.55 * r);
+    const k = 0.4 - 0.28 * L;
+    const tPeak = ((tau * k) / (1 - k)) * Math.log(1 / k);
+    this.pDecay = Math.exp(-1 / (tau * sr));
+    this.aDecay = Math.exp(-1 / (tau * k * sr));
+    this.pulseNorm = 1 / (Math.exp(-tPeak / tau) - Math.exp(-tPeak / (tau * k)));
     this.drive = p.drive[0] + (p.drive[1] - p.drive[0]) * L;
     this.driveNorm = 1 / Math.tanh(this.drive);
     this.rough = p.rough * Math.min(1.6, Math.max(0.3, 1.6 - this.rpm / 3000));
-    this.noiseAmt = 0.3 + 0.4 * L;
+    this.noiseAmt = 0.04 + 0.5 * L;
+    this.direct = 0.03 + 0.1 * L;
   }
 
   fire(i) {
@@ -147,7 +154,8 @@ class EngineDSP {
     const bank = this.banks[this.p.fires[i].b];
     let amp = (0.25 + 0.75 * this.load) * this.cyl[i] * (1 + (Math.random() * 2 - 1) * this.rough);
     if (this.rpm < 450) amp *= 0.35;
-    bank.pulse += amp * bank.gain;
+    bank.fast += amp * bank.gain;
+    bank.slow += amp * bank.gain;
   }
 
   render(out, n) {
@@ -196,10 +204,11 @@ class EngineDSP {
       let eng = 0;
       for (let b = 0; b < banks.length; b++) {
         const bank = banks[b];
-        bank.pulse *= this.pDecay;
-        let x = bank.pulse * (1 + this.noiseAmt * nz);
+        bank.slow *= this.pDecay;
+        bank.fast *= this.aDecay;
+        let x = (bank.slow - bank.fast) * this.pulseNorm * (1 + this.noiseAmt * nz);
         if (b === 0) x += pop * 0.8;
-        let y = x * 0.12;
+        let y = x * this.direct;
         for (let r = 0; r < bank.res.length; r++) y += bank.res[r].run(x) * bank.res[r].g;
         eng += y;
       }

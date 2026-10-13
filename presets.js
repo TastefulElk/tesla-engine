@@ -34,7 +34,7 @@ const PRESETS = [
     pops: 1,
     gain: 2.2,
     gears: [3.5, 2.2, 1.55, 1.2, 1, 0.82, 0.68],
-    final: 3.2,
+    final: 4.5,
   },
   {
     id: "v8fp",
@@ -59,7 +59,7 @@ const PRESETS = [
     pops: 0.6,
     gain: 2.2,
     gears: [3.3, 2.15, 1.6, 1.28, 1.06, 0.9, 0.76],
-    final: 3.6,
+    final: 5,
   },
   {
     id: "i6t",
@@ -82,7 +82,7 @@ const PRESETS = [
     pops: 1,
     gain: 2.2,
     gears: [4.1, 2.6, 1.75, 1.3, 1, 0.84],
-    final: 3.15,
+    final: 4.4,
   },
   {
     id: "rot",
@@ -107,7 +107,7 @@ const PRESETS = [
     pops: 1.4,
     gain: 1.5,
     gears: [3.48, 2.02, 1.39, 1, 0.72],
-    final: 4.1,
+    final: 5.4,
   },
 ];
 
