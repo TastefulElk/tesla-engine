@@ -28,6 +28,7 @@ const state = {
   preset: PRESETS.find((p) => p.id === store.get("preset", "v8tt")) || PRESETS[0],
   vol: store.get("vol", 0.8),
   drama: store.get("drama", 1),
+  input: store.get("input", "gps"),
   running: false,
   source: "gps",
   fix: null,
@@ -88,11 +89,13 @@ const initAudio = async () => {
 let wakeLock = null;
 
 const startEngine = async () => {
-  if (!ctx) await initAudio();
-  await ctx.resume();
+  // iOS grants motion access and starts audio only from inside the tap, so do both before awaiting anything.
   if (typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function") {
     DeviceMotionEvent.requestPermission().catch(() => {});
   }
+  const loading = ctx ? Promise.resolve() : initAudio();
+  ctx.resume();
+  await loading;
   try {
     wakeLock = await navigator.wakeLock?.request("screen");
   } catch {}
@@ -114,6 +117,70 @@ const stopEngine = () => {
   }, 400);
 };
 
+// ---------- phone motion throttle ----------
+
+const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const add = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const scale = (a, k) => [a[0] * k, a[1] * k, a[2] * k];
+const len = (a) => Math.sqrt(dot(a, a));
+const unit = (a) => (len(a) > 0 ? scale(a, 1 / len(a)) : a);
+
+// The phone can sit at any angle. Gravity tells us which way is up; matching the
+// phone's horizontal acceleration against GPS acceleration tells us which way is forward.
+const imu = { g: null, gRef: null, sum: [0, 0, 0], n: 0, fwd: [0, 0, 0], events: 0, a: 0, bias: 0, vInt: 0, lastT: 0 };
+const CALIBRATED = 2;
+
+const imuLive = () => performance.now() - imu.lastT < 300;
+const imuReady = () => imu.events >= CALIBRATED && imuLive();
+
+const resetImu = () => {
+  imu.gRef = null;
+  imu.fwd = [0, 0, 0];
+  imu.events = 0;
+  imu.bias = 0;
+  imu.a = 0;
+  imu.vInt = 0;
+};
+
+const onMotionSample = (e) => {
+  const G = e.accelerationIncludingGravity;
+  if (G?.x == null) return;
+  const now = performance.now();
+  const dt = imu.lastT ? clamp((now - imu.lastT) / 1000, 0, 0.1) : 0;
+  imu.lastT = now;
+  const gv = [G.x, G.y, G.z];
+  imu.g = imu.g ? add(imu.g, scale(sub(gv, imu.g), ease(dt, 1.5))) : gv;
+  const up = unit(imu.g);
+  // Phone moved more than ~25°: forget the learned direction.
+  if (imu.gRef && dot(up, imu.gRef) < 0.9) resetImu();
+  const L = e.acceleration;
+  const lin = L?.x != null ? [L.x, L.y, L.z] : sub(gv, imu.g);
+  const h = sub(lin, scale(up, dot(lin, up)));
+  imu.sum = add(imu.sum, h);
+  imu.n++;
+  if (imu.events >= CALIBRATED) {
+    imu.a += (dot(h, unit(imu.fwd)) - imu.bias - imu.a) * ease(dt, 0.1);
+    imu.vInt = clamp(imu.vInt + imu.a * dt, -4, 4);
+  }
+};
+
+// Runs on every GPS fix with the average GPS acceleration over the interval (or null).
+const imuOnFix = (raw) => {
+  if (raw !== null && imu.n >= 5) {
+    const mean = scale(imu.sum, 1 / imu.n);
+    if (Math.abs(raw) > 0.7 && len(mean) > 0.3) {
+      imu.fwd = add(scale(imu.fwd, 0.85), scale(mean, raw));
+      imu.events++;
+      if (!imu.gRef) imu.gRef = unit(imu.g);
+    }
+    if (imu.events >= CALIBRATED) imu.bias += 0.15 * (dot(mean, unit(imu.fwd)) - imu.bias - raw);
+  }
+  imu.sum = [0, 0, 0];
+  imu.n = 0;
+  imu.vInt = 0;
+};
+
 // ---------- speed input ----------
 
 const gps = { count: 0, last: null, interval: 0, prevT: 0, err: "", rawSpeed: null, computed: null };
@@ -129,12 +196,13 @@ const haversine = (a, b) => {
 
 const onFix = (v, t) => {
   const fix = { t, v: v < 0.6 ? 0 : v };
+  let raw = null;
   if (state.fix) {
     const dt = (t - state.fix.t) / 1000;
     if (dt > 0.25 && dt < 4) {
       // A fix only shows the average over the last interval. Extend the trend
       // to estimate the acceleration right now, so throttle and lift register a fix sooner.
-      const raw = (fix.v - state.fix.v) / dt;
+      raw = (fix.v - state.fix.v) / dt;
       const aNow = clamp(raw + 0.6 * (raw - state.rawAccel), raw - 2.5, raw + 2.5);
       state.rawAccel = raw;
       state.accel = Math.abs(aNow) < 0.2 ? 0 : aNow;
@@ -143,6 +211,7 @@ const onFix = (v, t) => {
       state.rawAccel = 0;
     }
   }
+  imuOnFix(raw);
   state.fix = fix;
 };
 
@@ -242,20 +311,28 @@ const tick = () => {
   const p = state.preset;
 
   // Speed: extrapolate the last fix with the measured acceleration to hide GPS lag.
+  // In phone mode, the phone's forward acceleration replaces the GPS estimate and fills in speed between fixes.
+  const phone = state.input === "phone" && state.source === "gps" && imuReady();
   let vTarget = 0;
   let a = 0;
   if (state.fix) {
     const age = (now - state.fix.t) / 1000;
-    a = age > 4 ? 0 : state.accel;
-    vTarget = Math.max(0, state.fix.v + a * Math.min(age, 1.2));
+    if (phone && age < 4) {
+      a = imu.a;
+      vTarget = Math.max(0, state.fix.v + imu.vInt);
+    } else {
+      a = age > 4 ? 0 : state.accel;
+      vTarget = Math.max(0, state.fix.v + a * Math.min(age, 1.2));
+    }
   }
-  state.v += (vTarget - state.v) * ease(dt, 0.15);
+  state.v += (vTarget - state.v) * ease(dt, phone ? 0.06 : 0.15);
   const moving = state.v > MOVING;
   if (moving) state.revHeld = false;
+  const launching = phone && !moving && a > 0.8;
 
   // Throttle is inferred from acceleration.
   let tLoad;
-  if (!moving) tLoad = state.revHeld ? 1 : 0;
+  if (!moving && !launching) tLoad = state.revHeld ? 1 : 0;
   else if (a > 0.25) tLoad = clamp(0.25 + ((a - 0.25) / 3.2) * state.drama, 0, 1);
   else if (a < -0.4) tLoad = 0;
   else tLoad = 0.22;
@@ -309,9 +386,11 @@ const tick = () => {
   let tRpm;
   if (sinceStart < 900) tRpm = 230;
   else if (sinceStart < 2600) tRpm = lerp(p.idle * 1.9, p.idle, (sinceStart - 900) / 1700);
+  else if (launching) tRpm = p.idle + state.load * 1800;
   else if (!moving) tRpm = state.revHeld ? p.redline * 1.02 : p.idle;
   else {
-    const slip = state.gear === 0 ? (p.idle + state.load * 1800) * clamp(1.6 - state.v / 5, 0, 1) : 0;
+    // Launch: revs hold at stall speed until the wheels catch up, like a slipping torque converter.
+    const slip = state.gear === 0 ? p.idle + state.load * 1800 : 0;
     tRpm = Math.max(p.idle, gearRpm(p, state.v, state.gear), slip);
   }
   if (blip) tRpm += 900;
@@ -349,6 +428,7 @@ const motion = { n: 0, on: 0, last: null, lastO: null, hz: 0, ohz: 0, pn: 0, pon
 // Desktop Chrome fires one empty event, so only count events that carry data.
 window.addEventListener("devicemotion", (e) => {
   motion.last = e;
+  onMotionSample(e);
   const g = e.accelerationIncludingGravity;
   if (e.acceleration?.x != null || g?.x != null || e.rotationRate?.alpha != null) motion.n++;
 });
@@ -436,6 +516,8 @@ const updateDiag = () => {
     ["Rotation rate", m?.rotationRate ? `${fmt(m.rotationRate.alpha)}, ${fmt(m.rotationRate.beta)}, ${fmt(m.rotationRate.gamma)}` : "null"],
     ["deviceorientation", `${motion.on} events, ${motion.ohz.toFixed(0)} Hz`],
     ["Orientation", o ? `${fmt(o.alpha, 1)}, ${fmt(o.beta, 1)}, ${fmt(o.gamma, 1)}` : "null"],
+    ["Forward learned", `${imu.events} of ${CALIBRATED} events`],
+    ["Forward accel", imu.events >= CALIBRATED ? `${fmt(imu.a)} m/s²` : "n/a"],
   ]);
   renderList(
     $("sensorDiag"),
@@ -466,6 +548,10 @@ const updateDiag = () => {
   const anySensor = SENSOR_NAMES.some((n) => sensors[n]?.n);
   if (motion.n || motion.on || anySensor) setChip($("chipMotion"), `Motion ${motion.hz.toFixed(0)} Hz`, "ok");
   else setChip($("chipMotion"), waited ? "No motion data" : "Motion checking", waited ? "bad" : "wait");
+  if (state.input === "gps") setChip($("chipInput"), "Throttle GPS", "ok");
+  else if (!imuLive()) setChip($("chipInput"), "Phone: no motion", "bad");
+  else if (!imuReady()) setChip($("chipInput"), `Phone learning ${imu.events}/${CALIBRATED}`, "wait");
+  else setChip($("chipInput"), "Phone motion", "ok");
   setChip($("chipAudio"), state.running ? "Audio on" : "Audio off", state.running ? "ok" : "wait");
   $("source").textContent = state.source === "demo" ? "Demo drive" : "GPS";
 };
@@ -573,6 +659,25 @@ const buildEngines = () => {
   }
 };
 
+const INPUT_NOTES = {
+  gps: "Throttle is worked out from GPS speed, so it trails your foot by about a second.",
+  phone:
+    "Open this page on your phone and play it through the car over Bluetooth. Keep the phone still in a mount or cupholder. It learns which way is forward after a couple of accelerations or stops, then reacts instantly.",
+};
+
+const bindInput = () => {
+  for (const mode of ["gps", "phone"]) {
+    const input = $(`input-${mode}`);
+    input.checked = state.input === mode;
+    input.addEventListener("change", () => {
+      state.input = mode;
+      store.set("input", mode);
+      $("inputNote").textContent = INPUT_NOTES[mode];
+    });
+  }
+  $("inputNote").textContent = INPUT_NOTES[state.input];
+};
+
 const bindControls = () => {
   $("power").addEventListener("click", () => (state.running ? stopEngine() : startEngine()));
   $("demo").addEventListener("click", runDemo);
@@ -603,6 +708,7 @@ const bindControls = () => {
 readTokens();
 buildEngines();
 bindControls();
+bindInput();
 startGps();
 startSensors();
 document.fonts?.ready.then(readTokens);

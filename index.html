@@ -91,6 +91,13 @@
   .engine:has(input:checked) { border-color: var(--amber); box-shadow: inset 0 0 0 1px var(--amber); }
   .engine:has(input:checked) strong { color: var(--amber); }
 
+  .inputs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); }
+  .seg { position: relative; display: grid; place-items: center; min-height: 56px; border-radius: 10px; cursor: pointer; }
+  .seg input { position: absolute; opacity: 0; pointer-events: none; }
+  .seg strong { font-family: var(--display); font-weight: 600; font-size: 1.15rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+  .seg:has(input:checked) { background: var(--amber); }
+  .seg:has(input:checked) strong { color: #1a1206; }
+  .seg:has(input:focus-visible) { outline: 2px solid var(--amber); outline-offset: 2px; }
   .sliders { display: grid; gap: 14px; }
   .slider { display: grid; grid-template-columns: 5.5rem 1fr; align-items: center; gap: 14px; }
   .slider label { font-family: var(--display); font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
@@ -117,6 +124,7 @@
     <div class="brand"><h1>Ghost Engine</h1><small>GPS-synced engine sound</small></div>
     <div class="chips">
       <span class="chip" id="chipGps" data-level="wait">GPS waiting</span>
+      <span class="chip" id="chipInput" data-level="wait">Throttle GPS</span>
       <span class="chip" id="chipMotion" data-level="wait">Motion checking</span>
       <span class="chip" id="chipAudio" data-level="wait">Audio off</span>
     </div>
@@ -142,6 +150,11 @@
     <section class="controls" aria-label="Controls">
       <button id="power" class="power" type="button">Start engine</button>
       <div class="engines" id="engines" role="radiogroup" aria-label="Engine"></div>
+      <div class="inputs" role="radiogroup" aria-label="Throttle input">
+        <label class="seg"><input type="radio" name="input" id="input-gps" value="gps"><strong>Car GPS</strong></label>
+        <label class="seg"><input type="radio" name="input" id="input-phone" value="phone"><strong>Phone motion</strong></label>
+      </div>
+      <p class="note" id="inputNote"></p>
       <div class="sliders">
         <div class="slider"><label for="vol">Volume</label><input id="vol" type="range" min="0" max="100" step="1"></div>
         <div class="slider"><label for="drama">Drama</label><input id="drama" type="range" min="50" max="200" step="5"></div>
